@@ -293,7 +293,7 @@ Stream is where the streamer is implemented. This class must extend the BatchStr
     public void process(BatchProcessStreamKey key) throws AppException, InformationalException {
 
       if (key.instanceID.isEmpty()) {
-        key.instanceID = BATCHPROCESSNAME.RM_AGE_RANGE_BATCH;
+        key.instanceID = BATCHPROCESSNAME.[JAVA IDENTIFIER FROM .CTX];
       }
 
       [PROJECT]BatchStreamWrapper streamObj = new [PROJECT]BatchStreamWrapper(this);
@@ -372,7 +372,7 @@ Stream is where the streamer is implemented. This class must extend the BatchStr
 
       for (int i = 0; i < this.resultList.dtls.size(); i++) {
 
-        RMDetermineAgeRangeExtractResult dtls = this.resultList.dtls.get(i);
+        [PROJECT]Result dtls = this.resultList.dtls.get(i);
         // Serialize the result elements of this record into a string and
         // add it to the final return
         chunkResult += dtls.concernRoleID + RMBatchConstants.kNewElement + dtls.  errorMessage
@@ -398,7 +398,7 @@ Stream is where the streamer is implemented. This class must extend the BatchStr
       }
 
       // clear results of this chunk
-      this.resultList = new RMDetermineAgeRangeExtractResultList();
+      this.resultList = new [PROJECT]ResultList();
       return chunkResult;
     }
 
@@ -497,3 +497,228 @@ public class [PROJECT]BatchStreamWrapper implements BatchStream {
 ```
 
 ## Developing Batch Reports
+Once all chunks have been processed, the Batch class can generate reports on how the batch run went. These reports can be emailed or, as shown below, saved to logs. I will walk through my best approximation of how this process works.
+
+There will be references to `RMBatchFile`, `RMBatchFileKey`, and `RMBatchConstants`. These are just utilities for creating the report files.
+
+`private void loadPropertyValues([ID]BatchProcessKey key)`
+- Sets values needed by other parts of the chunker (i.e. names for the generated log files)
+- Calls `initializeFilesAndCount()` to generate log file objects
+```
+private void loadPropertyValues(RMBatchProcessKey key) throws AppException {
+
+    batchStartDateTime = DateTime.getCurrentDateTime();
+    batchParameters = new StringBuilder();
+
+    if (key.instanceID.isEmpty()) {
+      key.instanceID = BATCHPROCESSNAME.[JAVA IDENTIFIER FROM .CTX];
+    }
+
+    if (key.processingDate != null && key.processingDate != Date.kZeroDate) {
+      key.processingDate = Date.getCurrentDate();
+    }
+    else {
+      batchParameters.append("processingDate=");
+      batchParameters.append(key.processingDate);
+    }
+
+    DateFormat dateTimeFormat = new SimpleDateFormat("MM.dd.yyyy HH.mm.ss", Locale.US);
+
+    Calendar cal = batchStartDateTime.getCalendar();
+    String timeStamp = dateTimeFormat.format(cal.getTime());
+
+    controlReportFileName =
+      BATCHPROCESSNAMEEntry.[JAVA IDENTIFIER FROM .CTX].toUserLocaleString() + " (Control Report " + timeStamp + ").log";
+
+    errorReportFileName =
+      BATCHPROCESSNAMEEntry.[JAVA IDENTIFIER FROM .CTX].toUserLocaleString() + " (Error Report " + timeStamp + ").log";
+
+    // Initialize files
+    initializeFilesAndCount();
+}
+```
+
+`private void initializeFilesAndCount()`
+- Initializes log files and creates report objects
+```
+private void initializeFilesAndCount() throws AppException {
+
+    errorRecordsMap = new HashMap<Long, String>();
+
+    // Control Report
+    RMBatchFileKey controlReportKey = new RMBatchFileKey();
+    controlReportKey.setCreateImmediately(true);
+    controlReportKey.setBatchStartDateTime(batchStartDateTime);
+    controlReportKey.setFileName(controlReportFileName);
+    controlReportKey.setFileTypeCode("PRG_LOG");
+    controlReportKey.setJobName(BATCHPROCESSNAMEEntry.[JAVA IDENTIFIER FROM .CTX].toUserLocaleString());
+    controlReportKey.setParameters(batchParameters.toString());
+    controlReport = new RMBatchFile(controlReportKey);
+
+    // Error Report
+    RMBatchFileKey errorReportKey = new RMBatchFileKey();
+    errorReportKey.setCreateImmediately(false);
+    errorReportKey.setBatchStartDateTime(batchStartDateTime);
+    errorReportKey.setFileName(errorReportFileName);
+    errorReportKey.setFileTypeCode("ERR_LOG");
+    errorReportKey.setJobName(BATCHPROCESSNAMEEntry.[JAVA IDENTIFIER FROM .CTX].toUserLocaleString());
+    errorReportKey.setParameters(batchParameters.toString());
+    errorReport = new RMBatchFile(errorReportKey);
+
+}
+```
+
+Streamers run -- processing records and generating ResultLists
+
+`public void sendBatchReport(String instanceID, BatchProcessDtls batchProcessDtls, BatchProcessChunkDtlsList processedBatchProcessChunkDtlsList, BatchProcessChunkDtlsList unprocessedBatchProcessChunkDtlsList)`
+- Called when streamers finish running to send batch report
+- Loops through the processed chunk details list and sends each detail string to `decodeProcessChunkResult()` to translate each string into a meaningful message
+- Finally, calls `updateReportWithCounts()` to populate reports with data
+```
+ @Override
+  public void sendBatchReport(String instanceID, BatchProcessDtls batchProcessDtls,
+    BatchProcessChunkDtlsList processedBatchProcessChunkDtlsList,
+    BatchProcessChunkDtlsList unprocessedBatchProcessChunkDtlsList) throws AppException, InformationalException {
+
+    // loop through all processed chunks and decode the results
+    for (BatchProcessChunkDtls tempChunkDtls : processedBatchProcessChunkDtlsList.dtls) {
+      try {
+
+        [PROJECT]ResultList tempResultList = decodeProcessChunkResult(tempChunkDtls.resultSummary);
+
+        // loop through the chunk result list to get down to the
+        for ([PROJECT]Result tempResultDetails : tempResultList.dtls) {
+          if (!RMBatchConstants.EMPTY_STRING.equals(tempResultDetails.errorMessage)) {
+            // Error occurred, add the errors to hash map
+            errorRecordsMap.put(tempResultDetails.concernRoleID, tempResultDetails.errorMessage);
+          }
+        }
+
+      } catch (Exception e) {
+        StringWriter errors = new StringWriter();
+        e.printStackTrace(new PrintWriter(errors));
+      }
+    }
+
+    updateReportsWithCounts();
+
+}
+```
+`public [PROJECT NAME]ResultList decodeProcessChunkResult(String key)`
+- This method uses the key string generated by the streamers to populate batch reports
+- Called from a foreach loop in `sendBatchReport()` for every processed chunk's details
+```
+@Override
+public [PROJECT]ResultList decodeProcessChunkResult(String key) throws AppException, InformationalException {
+
+    [PROJECT]ResultList resultList = new [PROJECT]ResultList();
+
+    // init for 1 item
+    String[] items = new String[1];
+
+    if (!StringUtil.isNullOrEmpty(key)) {
+
+      // check str for more than one item
+      if (key.contains(RMBatchConstants.kNewItem)) {
+        items = key.split(RMBatchConstants.kNewItemDelim);
+      }
+      else {
+        items[0] = key;
+      }
+
+      // iterate through items
+      for (int i = 0; i < items.length; i++) {
+        [PROJECT]Result recordResult = new [PROJECT]Result();
+
+        // split items based on getChunkResult encoding
+        String[] elements = items[i].split(RMBatchConstants.kNewElementDelim, -1);
+
+        /* 
+        * the recordResult.* values correspond to the values set in the chunkResult 
+        * string in the BatchStream class's getChunkResult() method.
+        * These values will likely be different for each batch implementation
+        */
+        recordResult.concernRoleID = Long.valueOf(elements[0]);
+        recordResult.errorMessage = elements[1];
+        recordResult.casesProcessed = Integer.valueOf(elements[2]);
+        recordResult.casesSkippedCount = Integer.valueOf(elements[3]);
+        recordResult.casesAdded = Integer.valueOf(elements[4]);
+        recordResult.casesUpdated = Integer.valueOf(elements[5]);
+
+        totalRecordsAdded += recordResult.casesAdded;
+        totalRecordsUpdated += recordResult.casesUpdated;
+
+        if (recordResult.casesUpdated == 1) {
+          updatedConcernRoles.add(elements[0]);
+        }
+
+        // add to return list
+        resultList.dtls.add(recordResult);
+      }
+    }
+
+    return resultList;
+}
+```
+
+`updateReportWIthCounts()`
+- Writes data to log files
+- Method will look different for each batch implementation to match that implementation's reporting requirements.
+- Basically, just a bunch of lines being written to a file
+```
+private void updateReportsWithCounts() throws AppException {
+
+    DateTime batchFinishDateTime = DateTime.getCurrentDateTime();
+
+    try {
+
+      // add batch end time to control report
+      controlReport.writePrintlnToFile(RMBatchConstants.BATCH_FINISH_TIME + batchFinishDateTime);
+      controlReport.writePrintlnToFile(CuramConst.gkEmpty);
+
+      // update control report with counts
+      controlReport.writePrintlnToFile(RM_AGE_RANGE_BATCH_TOTAL_PROCESSED + (totalRecordsToBeProcessed));
+
+      controlReport.writePrintlnToFile(RM_AGE_RANGE_BATCH_TOTAL_ADDED + (totalRecordsAdded));
+      controlReport.writePrintlnToFile(RM_AGE_RANGE_BATCH_TOTAL_UPDATED + (totalRecordsUpdated));
+      if (totalRecordsUpdated > 0) {
+        controlReport.writePrintlnToFile(CuramConst.gkEmpty);
+        controlReport.writePrintlnToFile(RM_AGE_RANGE_BATCH_USERS_UPDATED);
+        for (String concernRoleID : updatedConcernRoles) {
+          controlReport.writePrintlnToFile(concernRoleID);
+        }
+      }
+
+      // if erroredRecords found
+      if (!errorRecordsMap.isEmpty()) {
+
+        errorReport.writePrintlnToFile(CuramConst.gkEmpty);
+        errorReport.writePrintlnToFile(RMBatchConstants.BATCH_FINISH_TIME + batchFinishDateTime);
+
+        controlReport.writePrintlnToFile(CuramConst.gkEmpty);
+        controlReport.writePrintlnToFile(RMBatchConstants.NUMBER_FAILED_RECORDS + errorRecordsMap.size());
+
+        errorReport.writePrintlnToFile(RMBatchConstants.FAILURE_COMMENT);
+        errorReport.writePrintlnToFile(RMBatchFile.SECTION_SEPARATOR);
+
+        // update the errorReport with failed records from the HashMap
+        for (Long batchProcessingID : errorRecordsMap.keySet()) {
+
+          errorReport.writePrintlnToFile("Record processing failed for case: " + batchProcessingID);
+          errorReport.writePrintlnToFile(errorRecordsMap.get(batchProcessingID));
+          errorReport.writePrintlnToFile(CuramConst.gkEmpty);
+        }
+      }
+      else {
+        controlReport.writePrintlnToFile(CuramConst.gkEmpty);
+        controlReport.writePrintlnToFile(RMBatchConstants.NO_FAILURE_COMMENT);
+      }
+
+    } catch (Exception e) {
+      e.printStackTrace();
+    } finally {
+      controlReport.close();
+      errorReport.close();
+    }
+}
+```
